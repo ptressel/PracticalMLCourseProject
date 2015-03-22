@@ -563,13 +563,18 @@ gbm2.acc.final <- gbm2.cm$overall["Accuracy"]
 OUt-of-sample accuracies for the four models on the validation set are shown
 here.  (Out-of-sample error is one minus the accuracy.  This is also shown
 as requested, though it feels more fun to report a nice high accuracy.  Also,
-to be pedantic about terminology, these are the requested cross-validation
-errors, i.e. the errors on the reserved validation set.  The term
+to be pedantic about terminology, these are intended to satisfy the project's
+request for out-of-sample errors, where the sentence that asked for
+out-of-sample errors included the term "cross-validation".  IMO this was
+not intended to claim that "cross-validation" *is* the process used to
+get out-of-sample error -- especially not when it was emphasized
+*over and over* that we should hide away a validation set, and use that for
+the out-of-sample error to quote in any paper.  The term
 cross-validation also appeared above in the context of parameters used with
-caret's train and trainControl functions.  That usage of
-"cross-validation" and this are unrelated -- caret does its own internal
-cross-validation, and the models themselves are likely doing cross-validation
-as well as part of their own training procedures.)
+caret's train and trainControl functions -- caret does its own internal
+cross-validation as part of selecting the best model, and the models themselves
+are likely doing cross-validation with this intent as well as part of their
+own training procedures.)
 
 ```{r accuracies_on_validation_set, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE, results="asis"}
 require(xtable, quietly=TRUE)
