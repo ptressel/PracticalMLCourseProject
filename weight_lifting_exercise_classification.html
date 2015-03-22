@@ -184,32 +184,42 @@ knn
 <h3>Training and testing</h3>
 <p>At last, we’re ready to run the classifiers on the full training set. (Beware – if you are considering running this, it may take an entire day to complete, depending on your hardware.)</p>
 <p>All classifiers were trained under control of caret’s train, once with bootstrap resampling (trainControl method “boot”), and then with five-fold cross-validation but without repeating the entire run multiple times (trainControl method “cv” with number=5). The bootstrap resampling runs were used for the final models.</p>
-<p>Accuracies for the four models on the validation set are:</p>
+<p>OUt-of-sample accuracies for the four models on the validation set are shown here. (Out-of-sample error is one minus the accuracy. This is also shown as requested, though it feels more fun to report a nice high accuracy. Also, to be pedantic about terminology, these are the requested cross-validation errors, i.e. the errors on the reserved validation set. The term cross-validation also appeared above in the context of parameters used with caret’s train and trainControl functions. That usage of “cross-validation” and this are unrelated – caret does its own internal cross-validation, and the models themselves are likely doing cross-validation as well as part of their own training procedures.)</p>
 <table cellpadding="5" , border="1">
 <tr> <th> 
 —– Model —–
 </th> <th> 
 — Accuracy —
+</th> <th> 
+—– Error —–
 </th>  </tr>
   <tr> <td> 
 randomForest
 </td> <td> 
 0.9974
+</td> <td> 
+0.0026
 </td> </tr>
   <tr> <td> 
 svmPoly
 </td> <td> 
 0.9944
+</td> <td> 
+0.0056
 </td> </tr>
   <tr> <td> 
 gbm
 </td> <td> 
 0.9714
+</td> <td> 
+0.0286
 </td> </tr>
   <tr> <td> 
 qda
 </td> <td> 
 0.8837
+</td> <td> 
+0.1163
 </td> </tr>
    </table>
 <p><br /></p>
@@ -225,31 +235,43 @@ qda
 —– Model —–
 </th> <th> 
 — Accuracy —
+</th> <th> 
+—– Error —–
 </th>  </tr>
   <tr> <td> 
 voting
 </td> <td> 
 0.998
+</td> <td> 
+0.002
 </td> </tr>
   <tr> <td> 
 randomForest
 </td> <td> 
 0.9974
+</td> <td> 
+0.0026
 </td> </tr>
   <tr> <td> 
 svmPoly
 </td> <td> 
 0.9944
+</td> <td> 
+0.0056
 </td> </tr>
   <tr> <td> 
 gbm
 </td> <td> 
 0.9714
+</td> <td> 
+0.0286
 </td> </tr>
   <tr> <td> 
 qda
 </td> <td> 
 0.8837
+</td> <td> 
+0.1163
 </td> </tr>
    </table>
 <p><br /></p>

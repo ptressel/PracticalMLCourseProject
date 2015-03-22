@@ -560,7 +560,16 @@ gbm2.class <- predict(gbm2.model, newdata=test)
 gbm2.cm <- confusionMatrix(gbm2.class, test$classe)
 gbm2.acc.final <- gbm2.cm$overall["Accuracy"]
 ```
-Accuracies for the four models on the validation set are:
+OUt-of-sample accuracies for the four models on the validation set are shown
+here.  (Out-of-sample error is one minus the accuracy.  This is also shown
+as requested, though it feels more fun to report a nice high accuracy.  Also,
+to be pedantic about terminology, these are the requested cross-validation
+errors, i.e. the errors on the reserved validation set.  The term
+cross-validation also appeared above in the context of parameters used with
+caret's train and trainControl functions.  That usage of
+"cross-validation" and this are unrelated -- caret does its own internal
+cross-validation, and the models themselves are likely doing cross-validation
+as well as part of their own training procedures.)
 
 ```{r accuracies_on_validation_set, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE, results="asis"}
 require(xtable, quietly=TRUE)
@@ -572,8 +581,12 @@ model_acc.final <- c(round(rf.acc.final, digits=4),
                      round(svmpoly.acc.final, digits=4),
                      round(gbm2.acc.final, digits=4),
                      round(qda.acc.final, digits=4))
-model_names_acc.final <- cbind(model_names.final, model_acc.final)
-colnames(model_names_acc.final) <- c("----- Model -----", "--- Accuracy ---")
+model_err.final <- c(round(1-rf.acc.final, digits=4),
+                     round(1-svmpoly.acc.final, digits=4),
+                     round(1-gbm2.acc.final, digits=4),
+                     round(1-qda.acc.final, digits=4))
+model_names_acc.final <- cbind(model_names.final, model_acc.final, model_err.final)
+colnames(model_names_acc.final) <- c("----- Model -----", "--- Accuracy ---", "----- Error -----")
 rownames(model_names_acc.final) <- NULL
 # xtable completely ignores digits and no cellpadding is visible.
 model_names_acc.final.table <- xtable(model_names_acc.final, digits=c(4))
@@ -677,8 +690,9 @@ options(xtable.comment = FALSE)
 # Insert the voting results on top of the table.
 model_names.all <- c("voting", model_names.final)
 model_acc.all <- c(round(combined.acc, digits=4), model_acc.final)
-model_names_acc.all <- cbind(model_names.all, model_acc.all)
-colnames(model_names_acc.all) <- c("----- Model -----", "--- Accuracy ---")
+model_err.all <- c(round(1-combined.acc, digits=4), model_err.final)
+model_names_acc.all <- cbind(model_names.all, model_acc.all, model_err.all)
+colnames(model_names_acc.all) <- c("----- Model -----", "--- Accuracy ---", "----- Error -----")
 rownames(model_names_acc.all) <- NULL
 model_names_acc.all.table <- xtable(model_names_acc.all, digits=c(4))
 print(model_names_acc.all.table, floating=FALSE, type="html",
