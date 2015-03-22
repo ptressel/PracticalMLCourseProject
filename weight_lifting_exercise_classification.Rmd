@@ -1,0 +1,689 @@
+---
+title: "Weight Lifting Exercise Classification"
+author: "Patricia Tressel"
+date: "Sunday, March 22, 2015"
+output: html_document
+---
+
+### Introduction
+
+This is an exercise in classifying exercise performance, given data from
+body-mounted sensors on six subjects, performing one type of exercise correctly
+or in any of four incorrect ways.  The data were presented in:
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+For an overview and link to the paper, see:
+http://groupware.les.inf.puc-rio.br/har
+
+### Classification task
+
+Here, using a training dataset extracted from the above, we want to predict,
+on a supplied test set, which of the five forms of the exercise the user is
+executing.  This involves cleaning the data, selecting appropriate classifiers,
+selecting which data features to use, training and testing the classifiers,
+and predicting the test set.
+
+### Data cleaning
+
+The raw features in the dataset consist of short time sequences ("windows") of
+gyroscope and accelerometer readings describing the subject's motion, along
+with identifying information (timestamps, window ID numbers, etc.), and
+aggregate information computed and supplied once per window (min, max,
+variance, skewness, kurtosis).  The target class is supplied as letters A
+through E.  There are approximately 20000 rows.
+
+The aggregate information is very sparse, and not supplied for all windows.
+Since the number of readings per window is small, higher moments were of
+dubious quality.  The test set does not include entire window sequences, just
+individual samples, so it is not useful to base the prediction on time-series
+information -- prediction will have to be done on the basis of
+individual samples.  Some fields include spurious text strings -- these are
+treated as NA.  So, the following features were excluded up front:
+
+* columns that were NA for most samples
+* columns containing identifying information
+
+With those columns removed, the orignal 159 features (not counting the class)
+drops to 52.  These are still all the features that contain actual
+sensor readings, so this is not really a reduced set of features.
+
+At this point, one-tenth of the data, containing a representative portion of
+samples of each class, was split off and reserved for use as a validation set,
+and the remaining nine-tenths was used as the training set.  (In the
+following, "training set" or "full training set" refers to this nine-tenths
+portion, not to the original pml-training.csv set.)
+
+```{r data_prep, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# A number of libraries are used.  They will be loaded in the code chunk in
+# which they are first used.
+require(caret, quietly=TRUE)
+
+# See if the files are available in the current directory, else download them.
+pml_training_file <- "pml-training.csv"
+pml_testing_file <- "pml-testing.csv"
+pml_training_url <-
+    "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+pml_testing_url <-
+    "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if (!file.exists(pml_training_file)) {
+    download.file(pml_training_url, pml_training_file, "internal")
+}
+if (!file.exists(pml_testing_file)) {
+    download.file(pml_testing_url, pml_testing_file, "internal")
+}
+
+# Read in the data.  Interpret as NA some odd text in numeric fields.
+na_strings <- c("NA", "", "#DIV/0!")
+pml_training <- read.csv("pml-training.csv", na.strings=na_strings)
+pml_testing <- read.csv("pml-testing.csv", na.strings=na_strings)
+col_names_all <- names(pml_training)
+
+# Some columns contain computed information that is very sparsely
+# provided, and the values are suspect, so drop these columns that
+# are mostly NA.
+col_na <- apply(pml_training, 2, function(col) {
+    sum(is.na(col))
+})
+col_na_which <- which(col_na>10000)
+col_na_names <- names(col_na_which)
+
+# Remove the skewness and kurtosis columns -- those, too, are suspect,
+# as they seem to be computed from the "windows", which contain only
+# a small number of rows, not enough for higher moments.
+col_skewness <- grep("skewness", col_names_all, fixed=TRUE)
+col_kurtosis <- grep("kurtosis", col_names_all, fixed=TRUE)
+col_skewness_names <- col_names_all[col_skewness]
+col_kurtosis_names <- col_names_all[col_kurtosis]
+
+# There are also columns with identifying information, not features --
+# remove those as well. Have verified that there is no use to retaining
+# num_window, as the few aggregate values provided (not for all windows)
+# do not match a direct computation of the same aggregate, so they can't
+# be trusted.  And the test vectors are single rows, not entire windows,
+# so could not compute synthetic features from windows anyway.
+col_names_to_remove <- unique(c(col_na_names, col_skewness_names,
+                                col_kurtosis_names,
+                                "X", "user_name", "raw_timestamp_part_1",
+                                "raw_timestamp_part_2", "cvtd_timestamp",
+                                "new_window", "num_window"))
+pml_training[col_names_to_remove] <- list(NULL)
+pml_testing[col_names_to_remove] <- list(NULL)
+
+# At this point, 52 of the original 160 features remain, plus the class.
+
+# The target class column (classe) is the last column in pml_training,
+# and a column called problem_id is last in pml_testing.  This column
+# has to be excluded from many function calls, and others return
+# column indices based on the data frame with that column removed.
+# If the column were not last, matching up the column numbers would
+# be unsafe.  Were that the case, it could be removed and supplied
+# separately, or could be removed and then re-inserted as the last
+# column.
+
+# Get the usable feature names in order of their columns.
+names_first_cut <- names(pml_training)[1:ncol(pml_training)-1]
+
+# Split the data into 9:1 train / test and validation.  This places about
+# 18000 rows in the training set and 2000 in the validation set.
+# The validation set # will be set aside for final out-of-sample accuracy
+# testing.
+set.seed(8675309)
+train_rows = createDataPartition(pml_training$classe, p = 0.9)[[1]]
+train = pml_training[train_rows,]
+test = pml_training[-train_rows,]
+
+# Extract some small parts of the data for evaluating classifiers and testing
+# the workflow.  This will split into pieces that have about 1000 rows, that
+# will be used in pairs as training and test sets.  Only a few will be used,
+# but it's convenient to have createFolds produce the subsets so the classes
+# are equally represented.
+set.seed(54321)
+prep_rows <- createFolds(train$classe, k=18)
+prep_train_rows <- prep_rows[[1]]
+prep_test_rows <- prep_rows[[2]]
+prep_train = train[prep_train_rows,]
+prep_test = train[prep_test_rows,]
+```
+
+### Initial classifier selection
+
+Using this subset of features, a number of classifiers were tested.  The
+choice was restricted by these needs:
+
+* All of the features are continuous numerical data, so classifiers that act
+  on numerical data were needed.
+* There are multiple classes, so classifiers that can produce multiple-class
+  output were used.  It would also have been possible to use binary classifiers
+  by using all-against-one classes, but a sufficient set of options was
+  available without that.
+  
+These are the initial set of classifiers (package name in parentheses):
+
+* randomForest (randomForest) -- random forest
+* svmPoly (kernlab) -- support vector machine with polynomial kernel
+* svmRadial (kernlab) -- support vector machine with radial basis function
+  kernel
+* svm (e1071) -- support vector machine with radial basis function kernel
+* gbm (gbm) -- generalized boosted regression
+* lda (MASS) -- linear discriminant analysis
+* PenalizedLDA (penalizedLDA) -- linear discriminant analysis using Fisher's
+  discriminant
+* qda (MASS) -- quadratic discriminant analysis
+* knn (caret) -- K-nearest neighbors
+
+All of these were trained on the same one of the small datasets, and tested
+on another.  All were allowed to use their default options (with the
+exception of gbm, for which the distribution was set to multinomial in
+order to support multi-class output, and which had to be told not to be
+verbose).  Here are their accuracies.
+
+```{r run_classifiers_on_small_set, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+require(e1071, quietly=TRUE)  # for svm
+require(MASS, quietly=TRUE)  # for lda, qda
+require(gbm, quietly=TRUE)
+require(randomForest, quietly=TRUE)  # used by caret method rf
+require(kernlab, quietly=TRUE)  # for svmPoly, svmRadial
+require(penalizedLDA, quietly=TRUE)  # for PenalizedLDA
+
+# Train several classifiers.  Four had respectable results (over 80%) on the
+# small set, did not return errors or worrying warnings, and did not run for an
+# excessive time.
+
+# In order to save time, use either bootstrap resampling, or cross-validation
+# with a smaller number of folds and no repeats.
+train.ctrl <- trainControl(method="boot")
+#train.ctrl <- trainControl(method="cv", number=5)
+
+# Random forest, from package randomForest.
+rf.model <- train(classe ~ ., method="rf",
+                  data=prep_train, trControl=train.ctrl)
+rf.class <- predict(rf.model, newdata=prep_test)
+rf.cm <- confusionMatrix(rf.class, prep_test$classe)
+rf.acc <- rf.cm$overall["Accuracy"]
+
+# SVM with cubic polynomial kernel, from package kernlab.
+svmpoly.model <- train(classe ~ ., method="svmPoly",
+                       data=prep_train, trControl=train.ctrl)
+svmpoly.class <- predict(svmpoly.model, newdata=prep_test)
+svmpoly.cm <- confusionMatrix(svmpoly.class, prep_test$classe)
+svmpoly.acc <- svmpoly.cm$overall["Accuracy"]
+
+# Quadratic discriminant analysis
+qda.model <- train(classe ~ ., method="qda",
+                   data=prep_train, trControl=train.ctrl)
+qda.class <- predict(qda.model, newdata=prep_test)
+qda.cm <- confusionMatrix(qda.class, prep_test$classe)
+qda.acc <- qda.cm$overall["Accuracy"]
+
+# Gradient boosting
+gbm.model <- train(classe ~ ., method="gbm", distribution="multinomial",
+                   verbose=FALSE, data=prep_train, trControl=train.ctrl)
+gbm.class <- predict(gbm.model, newdata=prep_test)
+gbm.cm <- confusionMatrix(gbm.class, prep_test$classe)
+gbm.acc <- gbm.cm$overall["Accuracy"]
+
+# A number of other classifiers were tried.  Some were deemed not accurate
+# enough.
+
+# SVM with radial basis function kernel, from package kernlab.
+svmradial.model <- train(classe ~ ., method="svmRadial",
+                         data=prep_train, trControl=train.ctrl)
+svmradial.class <- predict(svmradial.model, newdata=prep_test)
+svmradial.cm <- confusionMatrix(svmradial.class, prep_test$classe)
+svmradial.acc <- svmradial.cm$overall["Accuracy"]
+
+# SVM from package e1071
+svm.model <- svm(classe ~ ., method="svm",
+                 data=prep_train, trControl=train.ctrl)
+svm.class <- predict(svm.model, newdata=prep_test)
+svm.cm <- confusionMatrix(svm.class, prep_test$classe)
+svm.acc <- svm.cm$overall["Accuracy"]
+
+# LDA
+lda.model <- train(classe ~ ., method="lda",
+                   data=prep_train, trControl=train.ctrl)
+lda.class <- predict(lda.model, newdata=prep_test)
+lda.cm <- confusionMatrix(lda.class, prep_test$classe)
+lda.acc <- lda.cm$overall["Accuracy"]
+
+# Penalized LDA with Fisher's discriminant, from penalizedLDA package.
+plda.model <- train(classe ~ ., method="PenalizedLDA",
+                    data=prep_train, trControl=train.ctrl)
+plda.class <- predict(lda.model, newdata=prep_test)
+plda.cm <- confusionMatrix(plda.class, prep_test$classe)
+plda.acc <- plda.cm$overall["Accuracy"]
+
+# K-nearest neighbor
+knn.model <- train(classe ~ ., method="knn",
+                     data=prep_train, trControl=train.ctrl)
+knn.class <- predict(knn.model, newdata=prep_test)
+knn.cm <- confusionMatrix(knn.class, prep_test$classe)
+knn.acc <- knn.cm$overall["Accuracy"]
+```
+```{r accuracies_on_small_set, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE, results="asis"}
+# Split this off from the actual classifier runs, so their cache won't be
+# invalidated when I have to try over and over to get xtable to produce an
+# even vaguely tolerable format.
+require(xtable, quietly=TRUE)
+options(xtable.comment = FALSE)
+# Gave up on xtable, switching to kable.
+#require(knitr, quietly=TRUE)
+# Gave up on kable, switching to hwriter.
+#require(hwriter, quietly=TRUE)
+
+# Show the accuracies in a table.
+model_names <- c("randomForest", "svmPoly", "svmRadial", "svm", "gbm",
+                 "lda", "PenalizedLDA", "qda", "knn")
+model_acc <- c(round(rf.acc, digits=4),
+               round(svmpoly.acc, digits=4),
+               round(svmradial.acc, digits=4),
+               round(svm.acc, digits=4),
+               round(gbm.acc, digits=4),
+               round(lda.acc, digits=4),
+               round(plda.acc, digits=4),
+               round(qda.acc, digits=4),
+               round(knn.acc, digits=4))
+model_names_acc <- cbind(model_names, model_acc)
+colnames(model_names_acc) <- c("----- Model -----", "--- Accuracy ---")
+rownames(model_names_acc) <- NULL
+# xtable completely ignores digits and does not insert cellpadding.
+# Giving up on xtable...no, came full circle back to it.  Faking the padding
+# by putting --- around the column headings to move the columns apart.
+model_names_acc.table <- xtable(model_names_acc, digits=c(4))
+print(model_names_acc.table, floating=FALSE, type="html", include.rownames=FALSE, html.table.attributes="cellpadding='5', border='1'")
+# kable didn't do any better.  Also ignores digits, padding.
+#kable(model_names_acc, format="html", digits=4, padding=3)
+# Trying hwriter...nopes, padding doesn't work here, either.
+#cat(hwrite(model_names_acc, border=1, row.names=FALSE, cellpadding=3))
+# Ok, I looked at the page source.  At least for hwrite, cellpadding was
+# present in the <table> tag.  So it's just not working, maybe due to some
+# toxic css included with the page.  Going to fake it...
+# It's not leaving a space after the table.  This isn't going to work for
+# some other output format...
+cat("<br />")
+```
+
+Four had accuracies above 80% on the small set, so these were retained for
+use on the full set:
+
+* randomForest
+* svmPoly
+* gbm
+* qda
+
+### Feature selection
+
+The next step is to see whether features can be omitted without overly
+compromising accuracy.  Two methods were used.
+
+First, highly correlated features were identified by computing their
+correlation matrix and allowing caret's findCorrelation to suggest one of
+each pair of correlated features for removal.  This was run on the full
+training set rather than one of the small subsets.  Surprisingly, this
+only identified a few features as highly correlated (fourteen, of which
+it suggested seven to remove).  It seemed hardly worth removing these few.
+
+Next, the variable importance was extracted from each model using varImp.
+Two of the models -- randomForest and gbm -- computed their own variable
+importance.  For the others -- svmPoly and qda -- varImp computed an
+importance based on the receiver operating characteristic (ROC).
+The importance scale isn't absolute -- it is re-scaled to be in the range
+0-100 -- so a common threshold for cutting off importance wouldn't be
+meaningful across all the classifiers.
+
+```{r feature_selection, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# Next, attempt to further reduce the number of features.
+# Note most of the work here was ultimately not used, so there are results
+# that are not shown in the report.
+
+# The findCorrelation function will look at the highly correlated features
+# in a correlation matrix, and recommend one of each pair for removal.
+# Run this on the whole training set.
+train.corr <- cor(train[, names_first_cut])
+train.high_corr <- findCorrelation(train.corr)
+train.high_corr.names <- names(train[, names_first_cut])[train.high_corr]
+
+# The varImp function will extract feature importance information from models.
+# We want to retain the features important to all the chosen models, so get
+# the max of the importances per feature.
+rf.varimp <- varImp(rf.model)
+rf.varimp.values <- rf.varimp["importance"][[1]]$Overall
+gbm.varimp <- varImp(gbm.model)
+gbm.varimp.values <- gbm.varimp["importance"][[1]]$Overall
+
+# qda's and svmPoly's varImp were produced by a different method, using ROC.
+# The structure returned by varImp is not the same as the others...
+qda.varimp <- varImp(qda.model)
+qda.varimp.values <- apply(qda.varimp$importance, 1, max)
+svmpoly.varimp <- varImp(svmpoly.model)
+svmpoly.varimp.values <- apply(svmpoly.varimp$importance, 1, max)
+
+# gbm has a small number of important features, and is not much degraded by
+# dropping features with importance below 10.  qda and svmPoly want all the
+# features.  Fortunately, qda the fastest to train, so let it have all the
+# features.  For rf, which is the best classifier, and still trains quickly,
+# it's not worth the accuracy degradation -- let it have all features as well.
+
+# For gbm, cut off features with importance below 10 (out of 100).
+gbm.features_to_keep <- gbm.varimp.values > 10
+gbm.keep.names <- names_first_cut[gbm.features_to_keep]
+# Remove the highly correlated columns.
+gbm.keep.names <- setdiff(gbm.keep.names, train.high_corr.names)
+# At this point, about two dozen features remain.  Strip the others from the
+# data.
+prep_train.keep <- prep_train[, c(gbm.keep.names, "classe")]
+prep_test.keep <- prep_test[, c(gbm.keep.names, "classe")]
+
+# Check how well gbm does on this reduced set.
+gbm.model.keep <- train(classe ~ ., method="gbm", distribution="multinomial", verbose=FALSE, data=prep_train.keep)
+gbm.class.keep <- predict(gbm.model.keep, newdata=prep_test.keep)
+gbm.cm.keep <- confusionMatrix(gbm.class.keep, prep_test.keep$classe)
+gbm.acc.keep <- gbm.cm.keep$overall["Accuracy"]
+
+# Run on a different set of partitions, and see if the selected features
+# change.  Do this only for gbm, as the others assign "high"" importance to
+# all the features.
+prep_train_rows_b <- prep_rows[[3]]
+prep_test_rows_b <- prep_rows[[4]]
+prep_train_b = train[prep_train_rows_b,]
+prep_test_b = train[prep_test_rows_b,]
+
+gbm.model_b <- train(classe ~ ., method="gbm", trControl=train.ctrl, distribution="multinomial", verbose=FALSE, data=prep_train_b)
+gbm.class_b <- predict(gbm.model_b, newdata=prep_test_b)
+gbm.cm_b <- confusionMatrix(gbm.class_b, prep_test_b$classe)
+gbm.acc_b <- gbm.cm_b$overall["Accuracy"]
+
+gbm.varimp_b <- varImp(gbm.model_b)
+gbm.varimp_b.values <- gbm.varimp_b["importance"][[1]]$Overall
+
+gbm.varimp_b.keep <- gbm.varimp_b.values > 10
+gbm.varimp_b.keep.names <- names_first_cut[gbm.varimp_b.keep]
+
+# These sets were not the same -- some 10 features were dropped and 3 added
+# in the second round.  Suspect the low-importance features are not stable.
+# Take the max of the importance values per feature from the two runs.
+gbm.varimp.both <- rbind(gbm.varimp.values,
+                         gbm.varimp_b.values)
+gbm.varimp.max <- apply(gbm.varimp.both, 2, max)
+gbm.keep <- gbm.varimp.max > 10
+gbm.keep.names <- names_first_cut[gbm.keep]
+gbm.keep.nc.names <- setdiff(gbm.keep.names, train.high_corr.names)
+
+# Retrain on the original folds.
+prep_train.gbm.keep <- prep_train[, c(gbm.keep.nc.names, "classe")]
+prep_test.gbm.keep <- prep_test[, c(gbm.keep.nc.names, "classe")]
+
+gbm.model_c <- train(classe ~ ., method="gbm", trControl=train.ctrl, distribution="multinomial", verbose=FALSE, data=prep_train.gbm.keep)
+gbm.class_c <- predict(gbm.model_c, newdata=prep_test.gbm.keep)
+gbm.cm_c <- confusionMatrix(gbm.class_c, prep_test.gbm.keep$classe)
+gbm.acc_c <- gbm.cm_c$overall["Accuracy"]
+```
+
+These show the distributions of variable importances for each classifier.
+
+```{r show_variable_importance, echo=FALSE, message=FALSE, warning=FALSE, fig.height=5, fig.width=7}
+# Show the distribution of importances for each classifier.
+par(mfrow=c(2, 2), oma=c(0, 0, 2, 0), mar=c(2,4,2,1))
+hist(rf.varimp.values, breaks=10, main="randomForest", xlab=NULL)
+box(which="figure", lty="solid")
+hist(svmpoly.varimp.values, breaks=10, main="svmPoly", xlab=NULL)
+box(which="figure", lty="solid")
+hist(gbm.varimp.values, breaks=10, main="gbm", xlab=NULL)
+box(which="figure", lty="solid")
+hist(qda.varimp.values, breaks=10, main="qda", xlab=NULL)
+box(which="figure", lty="solid")
+box(which="outer", lty="solid")
+mtext("Histograms of variable importances per classifier", outer=TRUE)
+```
+
+The importances based on the ROC (svmPoly, qda) were all fairly high.
+Importances for randomForest and gbm are bunched near zero with a tail at
+the high end, so these might seem candidates for discarding low-importance
+features.
+
+However, when gbm was run on the full training set, it lost accuracy using
+only the reduced set of features selected using its own variable importance,
+and removing higly-correlated features.  And randomForest was fast enough
+to train that it didn't have an excuse for cutting down features.  So,
+ultimately, the same 52 features, only excluding the useless features, were
+used for all.
+
+One other avenue not explored was principal components analysis (PCA).
+It might be interesting to see whether accuracy survives dimension reduction
+by using only the highest significance principal components.
+
+### Training and testing
+
+At last, we're ready to run the classifiers on the full training set.
+(Beware -- if you are considering running this, it may take an entire day
+to complete, depending on your hardware.)
+
+All classifiers were trained under control of caret's train, once with
+bootstrap resampling (trainControl method "boot"), and then with five-fold
+cross-validation but without repeating the entire run multiple times
+(trainControl method "cv" with number=5).
+The bootstrap resampling runs were used for the final models.
+
+```{r select_train_options, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# Would like to prompt the user at this point to pick whether they want to
+# do bootstrap resampling or cross-validation, but haven't had time to see
+# what readline does when run under knitr...  For now, hard-ware one option.
+# The user can uncomment the desired trainControl line.
+
+# Uncomment this for bootstrap resampling (the default for train).
+train.ctrl <- trainControl(method="boot")
+# Uncomment this for cross-validation.
+#train.ctrl <- trainControl(method="cv", number=5)
+```
+```{r train_rf, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# I ran the models outside of the Rmd file, and serialized them out to rds
+# files.  By the time I realized I'd have to re-run them from the Rmd file
+# to get them cached by knitr, there wasn't enough time left to do so.
+# So if the models are found on disk, they are read in, else the chosen
+# version of training is run.  Since others don't have the saved models,
+# they will be stuck running this if they want to knit this document.
+# But that's as it should be for reproducible research. :D
+rf_model_file <- "rf_model.rds"
+if (file.exists(rf_model_file)) {
+    # Whew!  Read in the saved model.
+    rf.model <- readRDS(rf_model_file)
+} else {
+    set.seed(5551212)
+    rf.model <- train(classe ~ ., method="rf", trControl=train.ctrl,
+                      data=train)
+}
+rf.class <- predict(rf.model, newdata=test)
+rf.cm <- confusionMatrix(rf.class, test$classe)
+rf.acc.final <- rf.cm$overall["Accuracy"]
+```
+```{r train_svmpoly, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+svmpoly_model_file <- "svmpoly_model.rds"
+if (file.exists(svmpoly_model_file)) {
+    # Whew!  Read in the saved model.
+    svmpoly.model <- readRDS(svmpoly_model_file)
+} else {
+    set.seed(15263748)
+    svmpoly.model <- train(classe ~ ., method="svmPoly", trControl=train.ctrl,
+                           data=train)
+}
+svmpoly.class <- predict(svmpoly.model, newdata=test)
+svmpoly.cm <- confusionMatrix(svmpoly.class, test$classe)
+svmpoly.acc.final <- svmpoly.cm$overall["Accuracy"]
+```
+```{r train_qda, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+qda_model_file <- "qda_model.rds"
+if (file.exists(qda_model_file)) {
+    # Whew!  Read in the saved model.
+    qda.model <- readRDS(qda_model_file)
+} else {
+    set.seed(51627384)
+    qda.model <- train(classe ~ ., method="qda", trControl=train.ctrl,
+                       data=train)
+}
+qda.class <- predict(qda.model, newdata=test)
+qda.cm <- confusionMatrix(qda.class, test$classe)
+qda.acc.final <- qda.cm$overall["Accuracy"]
+```
+```{r train_gbm, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+# This is the variant of gbm with the restricted set of features -- this isn't
+# used.
+# gbm_model_file <- "gbm_model.rds"
+# if (file.exists(gbm_model_file)) {
+#     # Whew!  Read in the saved model.
+#     gbm.model <- readRDS(gbm_model_file)
+# } else {
+#     # Only gbm gets to try a reduced feature set based on importance.
+#     set.seed(9876543)
+#     gbm.model <- train(classe ~ ., method="gbm", distribution="multinomial",
+#                        verbose=FALSE, trControl=train.ctrl,
+#                        data=train[, c(gbm.keep.nc.names, "classe")])
+# }
+# gbm.class <- predict(gbm.model,
+#                      newdata=test[, c(gbm.keep.nc.names, "classe")])
+# gbm.cm <- confusionMatrix(gbm.class, test$classe)
+# gbm.acc.final <- gbm.cm$overall["Accuracy"]
+```
+```{r train_gbm2, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+gbm2_model_file <- "gbm2_model.rds"
+if (file.exists(gbm2_model_file)) {
+    # Whew!  Read in the saved model.
+    gbm2.model <- readRDS(gbm2_model_file)
+} else {
+    # With the reduced features, gbm did not increase much in accuracy over
+    # the small training set -- re-try without restricting features.
+    set.seed(9876543)
+    gbm2.model <- train(classe ~ ., method="gbm", distribution="multinomial",
+                        verbose=FALSE, trControl=train.ctrl, data=train)
+}
+gbm2.class <- predict(gbm2.model, newdata=test)
+gbm2.cm <- confusionMatrix(gbm2.class, test$classe)
+gbm2.acc.final <- gbm2.cm$overall["Accuracy"]
+```
+Accuracies for the four models on the validation set are:
+
+```{r accuracies_on_validation_set, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE, results="asis"}
+require(xtable, quietly=TRUE)
+options(xtable.comment = FALSE)
+
+# Show the accuracies in a table.
+model_names.final <- c("randomForest", "svmPoly", "gbm", "qda")
+model_acc.final <- c(round(rf.acc.final, digits=4),
+                     round(svmpoly.acc.final, digits=4),
+                     round(gbm2.acc.final, digits=4),
+                     round(qda.acc.final, digits=4))
+model_names_acc.final <- cbind(model_names.final, model_acc.final)
+colnames(model_names_acc.final) <- c("----- Model -----", "--- Accuracy ---")
+rownames(model_names_acc.final) <- NULL
+# xtable completely ignores digits and no cellpadding is visible.
+model_names_acc.final.table <- xtable(model_names_acc.final, digits=c(4))
+print(model_names_acc.final.table, floating=FALSE, type="html",
+      include.rownames=FALSE,
+      html.table.attributes="cellpadding='5', border='1'")
+cat("<br />")
+```
+
+### Prediction
+
+To improve classification results, we can take a vote among a collection of
+independent classifiers.  Even weak classifiers can be combined to yield a
+better result than if used separately, so long as the classifiers are not
+biased the same way, and the majority do not tend to misclassify the the same
+samples.  The classifiers we have at hand include two that are
+doing quite well, thank you, on their own, but we can see if voting will
+improve the prediction.
+
+One reason for hope that this may work is that the set of
+classifiers includes some that are very different in structure -- a tree-based
+classifier such as a random forest, that can subdivide the space into tiny
+hyperrectangles, is not much like a support vector machine that uses
+curvilinear decision boundaries but is structurally opposed to overfitting.
+(It's unfortunate that K-nearest neighbors did not perform well, as that
+would be even more different.  But even had it performed well, it would not
+a good choice for a large dataset, as it has to carry along and search though
+that dataset on each prediction.)
+
+The classifiers don't get an equal vote -- the are weighted by their separate
+accuracy, in the hope that including a few bad classifiers won't pull the
+good ones down.  Note that voting was tried without weighting by accuracy,
+and the result was worse than the best two separate classifiers, so weighting
+is necessary.
+
+Enough talk -- let's vote and see what the results are.  We'll repeat the
+accuracy table, but include the voting results.
+
+```{r voting, echo=FALSE, message=FALSE, warning=FALSE}
+require(caret, quietly=TRUE)
+# Have the four classifiers vote for the final predictions.
+# Put them in a matrix, for ease of applying apply.
+predictions.separate <- cbind(rf=as.character(rf.class),
+                              svmpoly=as.character(svmpoly.class),
+                              gbm2=as.character(gbm2.class),
+                              qda=as.character(qda.class))
+
+# Pass in the accuracies to use as weights.  They don't need to be normalized
+# as that would just scale the total votes.
+accuracies.separate <- c(rf.acc.final,
+                         svmpoly.acc.final,
+                         gbm2.acc.final,
+                         qda.acc.final)
+
+# Make an empty named vector for counts that can be copied and filled in.
+tally_form <- c(A=0, B=0, C=0, D=0, E=0)
+
+# R doesn't seem to have a weighted crosstabulation function.  This is going
+# to loop -- sorry...
+weighted_vote <- function(...) {
+    # The ... args are the predicted classes, one per classifier.
+    # Returns the top-voted class.
+    # The original version was not weighted, and return more information
+    # about the voting:
+    # top = highest voted class name,
+    # votes = table of votes,
+    # against = number of disagreements with the top choice.
+    # That was going to be tricky with weights, so was dropped.
+    preds <- unlist(list(...))  # don't ask...
+    # Copy the tally form.
+    tally <- tally_form
+    # Those are in order of the classifiers in the rows of the vote matrix.
+    for (i in seq_along(preds)) {
+        tally[preds[i]] = tally[preds[i]] + accuracies.separate[i]
+    }
+    top <- which.max(tally)
+    names(top)
+    #votes <- table(preds)
+    #top <- which.max(votes)   # this will return the name as well
+    # Count how many disagreements there were with the top vote.
+    # (One could also check for "confusion", if (for instance) a number of
+    # classes received more than a trivial number of votes.)
+    #against <- sum(preds != names(top))
+    #list(top=names(top), votes=votes, against=against)
+}
+
+# Assemble the results from all the classifiers.
+combined.class <- apply(predictions.separate, 1, weighted_vote)
+
+# These are in the same order as the rows of the validation set, so each top
+# vote by index is the final prediction for the corresponding row at the same
+# index.
+combined.cm <- confusionMatrix(combined.class, test$classe)
+combined.acc <- combined.cm$overall["Accuracy"]
+```
+```{r report_accuracy_with_voting, echo=FALSE, message=FALSE, warning=FALSE, results="asis"}
+# Show the final accuracy.
+require(xtable, quietly=TRUE)
+options(xtable.comment = FALSE)
+
+# Insert the voting results on top of the table.
+model_names.all <- c("voting", model_names.final)
+model_acc.all <- c(round(combined.acc, digits=4), model_acc.final)
+model_names_acc.all <- cbind(model_names.all, model_acc.all)
+colnames(model_names_acc.all) <- c("----- Model -----", "--- Accuracy ---")
+rownames(model_names_acc.all) <- NULL
+model_names_acc.all.table <- xtable(model_names_acc.all, digits=c(4))
+print(model_names_acc.all.table, floating=FALSE, type="html",
+      include.rownames=FALSE,
+      html.table.attributes="cellpadding='5', border='1'")
+cat("<br />")
+```
+
