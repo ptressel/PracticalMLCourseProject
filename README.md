@@ -2,7 +2,8 @@
 
 This holds the Rmd file and knitted output for the course project in the Johns Hopkins Practical Machine Learning course offered via Coursera.
 
-The rendered (knitted) page can be viewed at:
+The rendered (knitted) report can be viewed at the following link.
+No code is shown in the report itself -- to see the code, please have a look at the Rmd file.
 
 http://ptressel.github.io/PracticalMLCourseProject/weight_lifting_exercise_classification.html
 
